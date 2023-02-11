@@ -119,6 +119,7 @@ import sysv_ipc
 import json
 from datetime import datetime
 import threading
+import paho.mqtt.client as mqtt
 
 
 ##########################
@@ -216,7 +217,7 @@ greenEnergyAmpsOffset = 0
 # 9 includes raw RS-485 messages transmitted and received (2-3 per sec)
 # 10 is all info.
 # 11 is more than all info.  ;)
-debugLevel = 1
+debugLevel = 10
 
 # Choose whether to display milliseconds after time on each line of debug info.
 displayMilliseconds = False
@@ -251,6 +252,11 @@ fakeTWCID = bytearray(b'\x77\x77')
 masterSign = bytearray(b'\x77')
 slaveSign = bytearray(b'\x77')
 
+# These values are used to store the amps received via MQTT
+current1 = current2 = current3 = -1
+p1_updated = datetime.min
+headroom = 16 # safe value
+
 #
 # End configuration parameters
 #
@@ -261,6 +267,25 @@ slaveSign = bytearray(b'\x77')
 #
 # Begin functions
 #
+
+def mqtt_init():
+  mqtt_broker = "127.0.0.1"
+  mqtt_p1_topic = "dsmr/json"
+  client = mqtt.Client("P1")
+  client.message_callback_add(mqtt_p1_topic,on_p1_message)
+  client.connect(mqtt_broker)
+  client.subscribe(mqtt_p1_topic)
+  client.loop_start()
+
+def on_p1_message(client, userdata, msg):
+  global current1, current2, current3, p1_updated, headroom
+  m_decode=str(msg.payload.decode("utf-8","ignore"))
+  m=json.loads(m_decode)
+  current1 = m.get('phase_power_current_l1', current1)
+  current2 = m.get('phase_power_current_l2', current2)
+  current3 = m.get('phase_power_current_l3', current3)
+  p1_updated = datetime.now()
+  headroom = int(wiringMaxAmpsAllTWCs - max(current1, current2, current3))
 
 def time_now():
     global displayMilliseconds
@@ -602,112 +627,7 @@ def total_amps_actual_all_twcs():
     if(debugLevel >= 10):
         print("Total amps all slaves are using: " + str(totalAmps))
     return totalAmps
-    
-def queue_background_task(task):
-    global backgroundTasksQueue, backgroundTasksCmds
-    if(task['cmd'] in backgroundTasksCmds):
-        # Some tasks, like cmd='charge', will be called once per second until
-        # a charge starts or we determine the car is done charging.  To avoid
-        # wasting memory queing up a bunch of these tasks when we're handling
-        # a charge cmd already, don't queue two of the same task.
-        return
 
-    # Insert task['cmd'] in backgroundTasksCmds to prevent queuing another
-    # task['cmd'] till we've finished handling this one.
-    backgroundTasksCmds[task['cmd']] = True
-
-    # Queue the task to be handled by background_tasks_thread.
-    backgroundTasksQueue.put(task)
-
-
-def background_tasks_thread():
-    global backgroundTasksQueue, backgroundTasksCmds, carApiLastErrorTime
-
-    while True:
-        task = backgroundTasksQueue.get()
-
-        if(task['cmd'] == 'charge'):
-            # car_api_charge does nothing if it's been under 60 secs since it
-            # was last used so we shouldn't have to worry about calling this
-            # too frequently.
-            car_api_charge(task['charge'])
-        elif(task['cmd'] == 'carApiEmailPassword'):
-            carApiLastErrorTime = 0
-            car_api_available(task['email'], task['password'])
-        elif(task['cmd'] == 'checkGreenEnergy'):
-            check_green_energy()
-
-        # Delete task['cmd'] from backgroundTasksCmds such that
-        # queue_background_task() can queue another task['cmd'] in the future.
-        del backgroundTasksCmds[task['cmd']]
-
-        # task_done() must be called to let the queue know the task is finished.
-        # backgroundTasksQueue.join() can then be used to block until all tasks
-        # in the queue are done.
-        backgroundTasksQueue.task_done()
-
-def check_green_energy():
-    global debugLevel, maxAmpsToDivideAmongSlaves, greenEnergyAmpsOffset, \
-           minAmpsPerTWC, backgroundTasksLock
-
-    # I check solar panel generation using an API exposed by The
-    # Energy Detective (TED). It's a piece of hardware available
-    # at http://www. theenergydetective.com
-    # You may also be able to find a way to query a solar system
-    # on the roof using an API provided by your solar installer.
-    # Most of those systems only update the amount of power the
-    # system is producing every 15 minutes at most, but that's
-    # fine for tweaking your car charging.
-    #
-    # In the worst case, you could skip finding realtime green
-    # energy data and simply direct the car to charge at certain
-    # rates at certain times of day that typically have certain
-    # levels of solar or wind generation. To do so, use the hour
-    # and min variables as demonstrated just above this line:
-    #   backgroundTasksQueue.put({'cmd':'checkGreenEnergy')
-    #
-    # The curl command used below can be used to communicate
-    # with almost any web API, even ones that require POST
-    # values or authentication. The -s option prevents curl from
-    # displaying download stats. -m 60 prevents the whole
-    # operation from taking over 60 seconds.
-    greenEnergyData = run_process('curl -s -m 60 "http://192.168.13.58/history/export.csv?T=1&D=0&M=1&C=1"')
-
-    # In case, greenEnergyData will contain something like this:
-    #   MTU, Time, Power, Cost, Voltage
-    #   Solar,11/11/2017 14:20:43,-2.957,-0.29,124.3
-    # The only part we care about is -2.957 which is negative
-    # kW currently being generated. When 0kW is generated, the
-    # negative disappears so we make it optional in the regex
-    # below.
-    m = re.search(b'^Solar,[^,]+,-?([^, ]+),', greenEnergyData, re.MULTILINE)
-    if(m):
-        solarW = int(float(m.group(1)) * 1000)
-
-        # Use backgroundTasksLock to prevent changing maxAmpsToDivideAmongSlaves
-        # if the main thread is in the middle of examining and later using
-        # that value.
-        backgroundTasksLock.acquire()
-
-        # Watts = Volts * Amps
-        # Car charges at 240 volts in North America so we figure
-        # out how many amps * 240 = solarW and limit the car to
-        # that many amps.
-        maxAmpsToDivideAmongSlaves = (solarW / 240) + \
-                                      greenEnergyAmpsOffset
-
-        if(debugLevel >= 1):
-            print("%s: Solar generating %dW so limit car charging to:\n" \
-                 "          %.2fA + %.2fA = %.2fA.  Charge when above %.0fA (minAmpsPerTWC)." % \
-                 (time_now(), solarW, (solarW / 240),
-                 greenEnergyAmpsOffset, maxAmpsToDivideAmongSlaves,
-                 minAmpsPerTWC))
-
-        backgroundTasksLock.release()
-    else:
-        print(time_now() +
-            " ERROR: Can't determine current solar generation from:\n" +
-            str(greenEnergyData))
 #
 # End functions
 #
@@ -1081,16 +1001,16 @@ class TWCSlave:
                 # charging, I'm not sure if this would prevent it from charging
                 # when next plugged in.
                 
-                # Commenting these lines out as there is no API anymore
-                # queue_background_task({'cmd':'charge', 'charge':False})
+                # Placeholder for start/stop code if we ever get it
+
             # elif(self.lastAmpsOffered >= 5.0 and self.reportedAmpsActual < 2.0
             #      and self.reportedState != 0x02
             # ):
                 # Car is not charging and is not reporting an error state, so
                 # try starting charge via car api.
                 
-                # Commenting these lines out as there is no API anymore
-                # queue_background_task({'cmd':'charge', 'charge':True})
+                # Placeholder for start/stop code if we ever get it
+
             # elif(self.reportedAmpsActual > 4.0):
                 # At least one plugged in car is successfully charging. We don't
                 # know which car it is, so we must set
@@ -1102,9 +1022,7 @@ class TWCSlave:
                 # seems less confusing to see in the output that we always try
                 # to start API charging after the car stops taking a charge.
                 
-                # Commenting these 2 lines out as there is no API anymore
-                # for vehicle in carApiVehicles:
-                #     vehicle.stopAskingToStartCharging = False
+                # Placeholder for start/stop code if we ever get it
 
         send_msg(bytearray(b'\xFB\xE0') + fakeTWCID + bytearray(self.TWCID)
                  + bytearray(self.masterHeartbeatData))
@@ -1215,22 +1133,11 @@ class TWCSlave:
         else:
             if(nonScheduledAmpsMax > -1):
                 maxAmpsToDivideAmongSlaves = nonScheduledAmpsMax
-            elif(now - timeLastGreenEnergyCheck > 60):
-                timeLastGreenEnergyCheck = now
-
-                # Don't bother to check solar generation before 6am or after
-                # 8pm. Sunrise in most U.S. areas varies from a little before
-                # 6am in Jun to almost 7:30am in Nov before the clocks get set
-                # back an hour. Sunset can be ~4:30pm to just after 8pm.
-                if(ltNow.tm_hour < 6 or ltNow.tm_hour >= 20):
-                    maxAmpsToDivideAmongSlaves = 0
-                else:
-                    queue_background_task({'cmd':'checkGreenEnergy'})
-
-        # Use backgroundTasksLock to prevent the background thread from changing
-        # the value of maxAmpsToDivideAmongSlaves after we've checked the value
-        # is safe to use but before we've used it.
-        backgroundTasksLock.acquire()
+            else:
+                # Set the max amps to charge to capacity minus headroom                
+                maxAmpsToDivideAmongSlaves = headroom
+                if(debugLevel >= 10):
+                    print("Remaining grid capacity is " + str(headroom))
 
         if(maxAmpsToDivideAmongSlaves > wiringMaxAmpsAllTWCs):
             # Never tell the slaves to draw more amps than the physical charger
@@ -1265,8 +1172,6 @@ class TWCSlave:
                   + " to " + str(desiredAmpsOffered)
                   + " with " + str(numCarsCharging)
                   + " cars charging.")
-
-        backgroundTasksLock.release()
 
         minAmpsToOffer = minAmpsPerTWC
         if(self.minAmpsTWCSupports > minAmpsToOffer):
@@ -1708,10 +1613,6 @@ webMsgResult = 0
 timeTo0Aafter06 = 0
 timeToRaise2A = 0
 
-backgroundTasksQueue = queue.Queue()
-backgroundTasksCmds = {}
-backgroundTasksLock = threading.Lock()
-
 ser = None
 ser = serial.Serial(rs485Adapter, baud, timeout=0)
 
@@ -1728,14 +1629,8 @@ ser = serial.Serial(rs485Adapter, baud, timeout=0)
 
 load_settings()
 
-
-# Create a background thread to handle tasks that take too long on the main
-# thread.  For a primer on threads in Python, see:
-# http://www.laurentluce.com/posts/python-threads-synchronization-locks-rlocks-semaphores-conditions-events-and-queues/
-backgroundTasksThread = threading.Thread(target=background_tasks_thread, args = ())
-backgroundTasksThread.daemon = True
-backgroundTasksThread.start()
-
+# Start listening to MQTT messages
+mqtt_init()
 
 # Create an IPC (Interprocess Communication) message queue that we can
 # periodically check to respond to queries from the TWCManager web interface.
