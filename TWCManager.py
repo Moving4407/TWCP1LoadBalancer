@@ -195,21 +195,6 @@ wiringMaxAmpsPerTWC = 25
 # rates really does.
 minAmpsPerTWC = 6
 
-# After determining how much green energy is available for charging, we add
-# greenEnergyAmpsOffset to the value. This is most often given a negative value
-# equal to the average amount of power consumed by everything other than car
-# charging. For example, if your house uses an average of 2.8A to power
-# computers, lights, etc while you expect the car to be charging, set
-# greenEnergyAmpsOffset = -2.8.
-#
-# If you have solar panels, look at your utility meter while your car charges.
-# If it says you're using 0.67kW, that means you should set
-# greenEnergyAmpsOffset = -0.67kW * 1000 / 240V = -2.79A assuming you're on the
-# North American 240V grid. In other words, during car charging, you want your
-# utility meter to show a value close to 0kW meaning no energy is being sent to
-# or from the grid.
-greenEnergyAmpsOffset = 0
-
 # Choose how much debugging info to output.
 # 0 is no output other than errors.
 # 1 is just the most useful info.
@@ -1032,7 +1017,7 @@ class TWCSlave:
         # Handle heartbeat message received from real slave TWC.
         global debugLevel, nonScheduledAmpsMax, \
                maxAmpsToDivideAmongSlaves, wiringMaxAmpsAllTWCs, \
-               timeLastGreenEnergyCheck, greenEnergyAmpsOffset, \
+               timeLastGreenEnergyCheck, \
                slaveTWCRoundRobin, spikeAmpsToCancel6ALimit, \
                chargeNowAmps, chargeNowTimeEnd, minAmpsPerTWC
 
@@ -1891,7 +1876,6 @@ while True:
                         + ', wiringMaxAmpsAllTWCs=' + str(wiringMaxAmpsAllTWCs)
                         + ', wiringMaxAmpsPerTWC=' + str(wiringMaxAmpsPerTWC)
                         + ', minAmpsPerTWC=' + str(minAmpsPerTWC)
-                        + ', greenEnergyAmpsOffset=' + str(greenEnergyAmpsOffset)
                         + ', debugLevel=' + str(debugLevel)
                         + '\n')
                     
@@ -2548,7 +2532,7 @@ while True:
                     print(time_now() + ": ***UNKNOWN MESSAGE from master: " + hex_str(msg))
 
     except KeyboardInterrupt:
-        print("Exiting after background tasks complete...")
+        print("Exiting...")
         break
 
     except Exception as e:
@@ -2560,11 +2544,6 @@ while True:
         time.sleep(5)
 
 
-# Wait for background tasks thread to finish all tasks.
-# Note that there is no such thing as backgroundTasksThread.stop(). Because we
-# set the thread type to daemon, it will be automatically killed when we exit
-# this program.
-backgroundTasksQueue.join()
 
 ser.close()
 
