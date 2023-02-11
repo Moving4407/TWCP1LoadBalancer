@@ -271,7 +271,7 @@ def on_p1_message(client, userdata, msg):
   current3 = m.get('phase_power_current_l3', current3)
   p1_updated = datetime.now()
   # Calculate the available amps by taking the grid max capacity, deduct current grid consumption and then add the amps used by the TWC's as an offset
-  totalAmpsAllTWCs = total_amps_actual_all_twcs()
+  totalAmpsAllTWCs = math.ceil(total_amps_actual_all_twcs())
   headroom = int(wiringMaxAmpsAllTWCs - max(current1, current2, current3) + totalAmpsAllTWCs)
 
 def time_now():
