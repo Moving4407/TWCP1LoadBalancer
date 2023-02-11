@@ -602,7 +602,112 @@ def total_amps_actual_all_twcs():
     if(debugLevel >= 10):
         print("Total amps all slaves are using: " + str(totalAmps))
     return totalAmps
+    
+def queue_background_task(task):
+    global backgroundTasksQueue, backgroundTasksCmds
+    if(task['cmd'] in backgroundTasksCmds):
+        # Some tasks, like cmd='charge', will be called once per second until
+        # a charge starts or we determine the car is done charging.  To avoid
+        # wasting memory queing up a bunch of these tasks when we're handling
+        # a charge cmd already, don't queue two of the same task.
+        return
 
+    # Insert task['cmd'] in backgroundTasksCmds to prevent queuing another
+    # task['cmd'] till we've finished handling this one.
+    backgroundTasksCmds[task['cmd']] = True
+
+    # Queue the task to be handled by background_tasks_thread.
+    backgroundTasksQueue.put(task)
+
+
+def background_tasks_thread():
+    global backgroundTasksQueue, backgroundTasksCmds, carApiLastErrorTime
+
+    while True:
+        task = backgroundTasksQueue.get()
+
+        if(task['cmd'] == 'charge'):
+            # car_api_charge does nothing if it's been under 60 secs since it
+            # was last used so we shouldn't have to worry about calling this
+            # too frequently.
+            car_api_charge(task['charge'])
+        elif(task['cmd'] == 'carApiEmailPassword'):
+            carApiLastErrorTime = 0
+            car_api_available(task['email'], task['password'])
+        elif(task['cmd'] == 'checkGreenEnergy'):
+            check_green_energy()
+
+        # Delete task['cmd'] from backgroundTasksCmds such that
+        # queue_background_task() can queue another task['cmd'] in the future.
+        del backgroundTasksCmds[task['cmd']]
+
+        # task_done() must be called to let the queue know the task is finished.
+        # backgroundTasksQueue.join() can then be used to block until all tasks
+        # in the queue are done.
+        backgroundTasksQueue.task_done()
+
+def check_green_energy():
+    global debugLevel, maxAmpsToDivideAmongSlaves, greenEnergyAmpsOffset, \
+           minAmpsPerTWC, backgroundTasksLock
+
+    # I check solar panel generation using an API exposed by The
+    # Energy Detective (TED). It's a piece of hardware available
+    # at http://www. theenergydetective.com
+    # You may also be able to find a way to query a solar system
+    # on the roof using an API provided by your solar installer.
+    # Most of those systems only update the amount of power the
+    # system is producing every 15 minutes at most, but that's
+    # fine for tweaking your car charging.
+    #
+    # In the worst case, you could skip finding realtime green
+    # energy data and simply direct the car to charge at certain
+    # rates at certain times of day that typically have certain
+    # levels of solar or wind generation. To do so, use the hour
+    # and min variables as demonstrated just above this line:
+    #   backgroundTasksQueue.put({'cmd':'checkGreenEnergy')
+    #
+    # The curl command used below can be used to communicate
+    # with almost any web API, even ones that require POST
+    # values or authentication. The -s option prevents curl from
+    # displaying download stats. -m 60 prevents the whole
+    # operation from taking over 60 seconds.
+    greenEnergyData = run_process('curl -s -m 60 "http://192.168.13.58/history/export.csv?T=1&D=0&M=1&C=1"')
+
+    # In case, greenEnergyData will contain something like this:
+    #   MTU, Time, Power, Cost, Voltage
+    #   Solar,11/11/2017 14:20:43,-2.957,-0.29,124.3
+    # The only part we care about is -2.957 which is negative
+    # kW currently being generated. When 0kW is generated, the
+    # negative disappears so we make it optional in the regex
+    # below.
+    m = re.search(b'^Solar,[^,]+,-?([^, ]+),', greenEnergyData, re.MULTILINE)
+    if(m):
+        solarW = int(float(m.group(1)) * 1000)
+
+        # Use backgroundTasksLock to prevent changing maxAmpsToDivideAmongSlaves
+        # if the main thread is in the middle of examining and later using
+        # that value.
+        backgroundTasksLock.acquire()
+
+        # Watts = Volts * Amps
+        # Car charges at 240 volts in North America so we figure
+        # out how many amps * 240 = solarW and limit the car to
+        # that many amps.
+        maxAmpsToDivideAmongSlaves = (solarW / 240) + \
+                                      greenEnergyAmpsOffset
+
+        if(debugLevel >= 1):
+            print("%s: Solar generating %dW so limit car charging to:\n" \
+                 "          %.2fA + %.2fA = %.2fA.  Charge when above %.0fA (minAmpsPerTWC)." % \
+                 (time_now(), solarW, (solarW / 240),
+                 greenEnergyAmpsOffset, maxAmpsToDivideAmongSlaves,
+                 minAmpsPerTWC))
+
+        backgroundTasksLock.release()
+    else:
+        print(time_now() +
+            " ERROR: Can't determine current solar generation from:\n" +
+            str(greenEnergyData))
 #
 # End functions
 #
@@ -961,10 +1066,10 @@ class TWCSlave:
         if(len(overrideMasterHeartbeatData) >= 7):
             self.masterHeartbeatData = overrideMasterHeartbeatData
 
-        if(self.protocolVersion == 2):
+        # if(self.protocolVersion == 2):
             # TODO: Start and stop charging using protocol 2 commands to TWC
             # instead of car api if I ever figure out how.
-            if(self.lastAmpsOffered == 0 and self.reportedAmpsActual > 4.0):
+            # if(self.lastAmpsOffered == 0 and self.reportedAmpsActual > 4.0):
                 # Car is trying to charge, so stop it via car API.
                 # car_api_charge() will prevent telling the car to start or stop
                 # more than once per minute. Once the car gets the message to
@@ -976,17 +1081,17 @@ class TWCSlave:
                 # charging, I'm not sure if this would prevent it from charging
                 # when next plugged in.
                 
-                # Commenting this line out as there is no API anymore
+                # Commenting these lines out as there is no API anymore
                 # queue_background_task({'cmd':'charge', 'charge':False})
-            elif(self.lastAmpsOffered >= 5.0 and self.reportedAmpsActual < 2.0
-                 and self.reportedState != 0x02
-            ):
+            # elif(self.lastAmpsOffered >= 5.0 and self.reportedAmpsActual < 2.0
+            #      and self.reportedState != 0x02
+            # ):
                 # Car is not charging and is not reporting an error state, so
                 # try starting charge via car api.
                 
-                # Commenting this line out as there is no API anymore
+                # Commenting these lines out as there is no API anymore
                 # queue_background_task({'cmd':'charge', 'charge':True})
-            elif(self.reportedAmpsActual > 4.0):
+            # elif(self.reportedAmpsActual > 4.0):
                 # At least one plugged in car is successfully charging. We don't
                 # know which car it is, so we must set
                 # vehicle.stopAskingToStartCharging = False on all vehicles such
@@ -1809,8 +1914,6 @@ while True:
                         '`' + str(scheduledAmpsDaysBitmap) +
                         '`' + "%02d:%02d" % (int(hourResumeTrackGreenEnergy),
                                              int((hourResumeTrackGreenEnergy % 1) * 60)) +
-                        # Send 1 if we need an email/password entered for car api, otherwise send 0
-                        '`' + ('1' if needCarApiBearerToken else '0') +
                         '`' + str(len(slaveTWCRoundRobin))
                         )
 
