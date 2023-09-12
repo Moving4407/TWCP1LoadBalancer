@@ -48,6 +48,8 @@ git clone https://github.com/Moving4407/TWCP1LoadBalancer.git TWC
 cp TWC/HTML/* /var/www/html
 sudo nano ~/TWC/TWCManager.py
 
+Note: If your are not running this on a Raspberry Pi you'll need to change your username in the index.php file that points to the path of the TWC script
+
 Edit the script to, at a minimum, set:
 wiringMaxAmpsAllTWCs = 25 # This is the maximum power made available to you, equal to the amps on your main circuit breaker 
 wiringMaxAmpsPerTWC = 25 # If you have multiple TWC's installed they will all have their own circuit breaker and you can set this value here. Otherwise 
@@ -64,4 +66,4 @@ sudo nano /etc/rc.local
 
 Near the end of the file, before the exit 0 line, add:
 
-su - pi -c "screen -dm -S TWCManager ~/TWC/TWCManager.py"
+su - <your_current_username> -c "screen -dm -S TWCManager ~/TWC/TWCManager.py"
