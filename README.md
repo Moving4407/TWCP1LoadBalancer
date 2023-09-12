@@ -36,18 +36,17 @@ sudo lighty-enable-mod fastcgi-php
 service lighttpd force-reload
 sudo chown -R www-data:www-data /var/www/html
 sudo chmod -R 775 /var/www/html
-sudo usermod -a -G www-data pi
+sudo usermod -a -G www-data <your_current_username>
 
 Install Python packages:
 sudo python3 -m pip install pyserial
 sudo python3 -m pip install sysv_ipc
+sudo python3 -m pip install paho-mqtt
 
 cd ~
-git clone -b master https://github.com/Moving4407/TWCP1LoadBalancer.git TWC
-sudo mv TW TWC
+git clone https://github.com/Moving4407/TWCP1LoadBalancer.git TWC
 cp TWC/HTML/* /var/www/html
 sudo nano ~/TWC/TWCManager.py
-cd TWC/
 
 Edit the script to, at a minimum, set:
 wiringMaxAmpsAllTWCs = 25 # This is the maximum power made available to you, equal to the amps on your main circuit breaker 
@@ -55,6 +54,8 @@ wiringMaxAmpsPerTWC = 25 # If you have multiple TWC's installed they will all ha
 
 You can now run the script by typing:
 
+cd TWC/
+sudo chmod +x TWCManager.py
 ./TWCManager.py 
 
 If everything works as advertised you can run the script at startup:
